@@ -3,6 +3,9 @@
 namespace TheNetworg\OAuth2\Client\Provider;
 
 use Firebase\JWT\JWT;
+use phpseclib3\Crypt\PublicKeyLoader;
+use phpseclib3\Crypt\RSA;
+use phpseclib3\Math\BigInteger;
 use League\OAuth2\Client\Grant\AbstractGrant;
 use League\OAuth2\Client\Provider\AbstractProvider;
 use League\OAuth2\Client\Provider\Exception\IdentityProviderException;
@@ -276,8 +279,8 @@ class Azure extends AbstractProvider
      */
     public function validateAccessToken($accessToken)
     {
-        $keys        = $this->getJwtVerificationKeys();
-        $tokenClaims = (array)JWT::decode($accessToken, $keys, ['RS256']);
+        $key        = $this->getJwtVerificationKeys();
+        $tokenClaims = (array)JWT::decode($accessToken, $key, ['RS256']);
 
         $this->validateTokenClaims($tokenClaims);
 
@@ -326,41 +329,17 @@ class Azure extends AbstractProvider
 
         $response = $this->getParsedResponse($request);
 
-        $keys = [];
-        foreach ($response['keys'] as $i => $keyinfo) {
-            if (isset($keyinfo['x5c']) && is_array($keyinfo['x5c'])) {
-                foreach ($keyinfo['x5c'] as $encodedkey) {
-                    $cert =
-                        '-----BEGIN CERTIFICATE-----' . PHP_EOL
-                        . chunk_split($encodedkey, 64,  PHP_EOL)
-                        . '-----END CERTIFICATE-----' . PHP_EOL;
+        $keyinfo = $response['keys'][0];
 
-                    $cert_object = openssl_x509_read($cert);
+        $exponent = $this->convert_base64url_to_base64($keyinfo['e']); // Alter to correct format
+        $modulus = $this->convert_base64url_to_base64($keyinfo['n']); // Alter to correct format
 
-                    if ($cert_object === false) {
-                        throw new \RuntimeException('An attempt to read ' . $encodedkey . ' as a certificate failed.');
-                    }
+        $key = PublicKeyLoader::load([
+            'e' => new BigInteger(base64_decode($exponent), 256),
+            'n' => new BigInteger(base64_decode($modulus), 256)
+        ]);
 
-                    $pkey_object = openssl_pkey_get_public($cert_object);
-
-                    if ($pkey_object === false) {
-                        throw new \RuntimeException('An attempt to read a public key from a ' . $encodedkey . ' certificate failed.');
-                    }
-
-                    $pkey_array = openssl_pkey_get_details($pkey_object);
-
-                    if ($pkey_array === false) {
-                        throw new \RuntimeException('An attempt to get a public key as an array from a ' . $encodedkey . ' certificate failed.');
-                    }
-
-                    $publicKey = $pkey_array ['key'];
-
-                    $keys[$keyinfo['kid']] = $publicKey;
-                }
-            }
-        }
-
-        return $keys;
+        return $key;
     }
 
     protected function getVersionUriInfix($version)
@@ -439,5 +418,14 @@ class Azure extends AbstractProvider
         }
 
         return $response;
+    }
+
+    private function convert_base64url_to_base64($input="") {
+
+        $padding = strlen($input) % 4;
+        if ($padding > 0) {
+            $input .= str_repeat("=", 4 - $padding);
+        }
+        return strtr($input, '-_', '+/');
     }
 }
