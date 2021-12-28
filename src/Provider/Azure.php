@@ -19,7 +19,7 @@ class Azure extends AbstractProvider
 
     use BearerAuthorizationTrait;
 
-    public $urlLogin = 'https://login.microsoftonline.com/';
+    public $urlLogin = '';
 
     /** @var array|null */
     protected $openIdConfiguration;
@@ -29,6 +29,8 @@ class Azure extends AbstractProvider
     public $scopeSeparator = ' ';
 
     public $tenant = 'common';
+
+    public $policy = '';
 
     public $defaultEndPointVersion = self::ENDPOINT_VERSION_1_0;
 
@@ -57,7 +59,7 @@ class Azure extends AbstractProvider
      * @param string $tenant
      * @param string $version
      */
-    protected function getOpenIdConfiguration($tenant, $version) {
+    protected function getOpenIdConfiguration($policy, $tenant, $version) {
         if (!is_array($this->openIdConfiguration)) {
             $this->openIdConfiguration = [];
         }
@@ -66,7 +68,8 @@ class Azure extends AbstractProvider
         }
         if (!array_key_exists($version, $this->openIdConfiguration[$tenant])) {
             $versionInfix = $this->getVersionUriInfix($version);
-            $openIdConfigurationUri = $this->urlLogin . $tenant . $versionInfix . '/.well-known/openid-configuration';
+            $openIdConfigurationUri = $this->urlLogin . $tenant . '/' . $policy . $versionInfix . '/.well-known/openid-configuration';
+
             $factory = $this->getRequestFactory();
             $request = $factory->getRequestWithOptions(
                 'get',
@@ -82,13 +85,13 @@ class Azure extends AbstractProvider
 
     public function getBaseAuthorizationUrl()
     {
-        $openIdConfiguration = $this->getOpenIdConfiguration($this->tenant, $this->defaultEndPointVersion);
+        $openIdConfiguration = $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
         return $openIdConfiguration['authorization_endpoint'];
     }
 
     public function getBaseAccessTokenUrl(array $params)
     {
-        $openIdConfiguration = $this->getOpenIdConfiguration($this->tenant, $this->defaultEndPointVersion);
+        $openIdConfiguration = $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
         return $openIdConfiguration['token_endpoint'];
     }
 
@@ -153,6 +156,7 @@ class Azure extends AbstractProvider
     public function getRootMicrosoftGraphUri($accessToken)
     {
         if (is_null($accessToken)) {
+            $policy = $this->policy;
             $tenant = $this->tenant;
             $version = $this->defaultEndPointVersion;
         } else {
@@ -160,15 +164,14 @@ class Azure extends AbstractProvider
             $tenant = array_key_exists('tid', $idTokenClaims) ? $idTokenClaims['tid'] : $this->tenant;
             $version = array_key_exists('ver', $idTokenClaims) ? $idTokenClaims['ver'] : $this->defaultEndPointVersion;
         }
-        $openIdConfiguration = $this->getOpenIdConfiguration($tenant, $version);
+        $openIdConfiguration = $this->getOpenIdConfiguration($policy, $tenant, $version);
         return 'https://' . $openIdConfiguration['msgraph_host'];
     }
 
-    public function get($ref, &$accessToken, $headers = [], $doNotWrap = false)
+    public function get($ref, &$accessToken, $headers = [])
     {
         $response = $this->request('get', $ref, $accessToken, ['headers' => $headers]);
-
-        return $doNotWrap ? $response : $this->wrapResponse($response);
+        return $this->wrapResponse($response);
     }
 
     public function post($ref, $body, &$accessToken, $headers = [])
@@ -254,7 +257,7 @@ class Azure extends AbstractProvider
      */
     public function getLogoutUrl($post_logout_redirect_uri = "")
     {
-        $openIdConfiguration = $this->getOpenIdConfiguration($this->tenant, $this->defaultEndPointVersion);
+        $openIdConfiguration = $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
         $logoutUri = $openIdConfiguration['end_session_endpoint'];
 
         if (!empty($post_logout_redirect_uri)) {
@@ -315,7 +318,7 @@ class Azure extends AbstractProvider
      */
     public function getJwtVerificationKeys()
     {
-        $openIdConfiguration = $this->getOpenIdConfiguration($this->tenant, $this->defaultEndPointVersion);
+        $openIdConfiguration = $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
         $keysUri = $openIdConfiguration['jwks_uri'];
 
         $factory = $this->getRequestFactory();
@@ -379,7 +382,7 @@ class Azure extends AbstractProvider
      */
     public function getTenantDetails($tenant, $version)
     {
-        return $this->getOpenIdConfiguration($this->tenant, $this->defaultEndPointVersion);
+        return $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
     }
 
     protected function checkResponse(ResponseInterface $response, $data)
