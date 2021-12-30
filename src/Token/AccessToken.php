@@ -25,6 +25,7 @@ class AccessToken extends \League\OAuth2\Client\Token\AccessToken
                 $tks = explode('.', $this->idToken);
                 // Check if the id_token contains signature
                 if (3 == count($tks) && !empty($tks[2])) {
+                    JWT::$leeway = 5;
                     $idTokenClaims = (array)JWT::decode($this->idToken, $keys, ['RS256']);
                 } else {
                     // The id_token is unsigned (coming from v1.0 endpoint) - https://msdn.microsoft.com/en-us/library/azure/dn645542.aspx
