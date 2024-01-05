@@ -4,4 +4,6 @@ composer.phar
 composer.lock
 .DS_Store
 
-.idea
+# IDE
+/.idea
+/.vscode

@@ -3,13 +3,17 @@
 namespace TheNetworg\OAuth2\Client\Provider;
 
 use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
 use phpseclib3\Crypt\PublicKeyLoader;
 use phpseclib3\Crypt\RSA;
 use phpseclib3\Math\BigInteger;
 use League\OAuth2\Client\Grant\AbstractGrant;
 use League\OAuth2\Client\Provider\AbstractProvider;
 use League\OAuth2\Client\Provider\Exception\IdentityProviderException;
+use League\OAuth2\Client\Provider\ResourceOwnerInterface;
+use League\OAuth2\Client\Token\AccessTokenInterface;
 use League\OAuth2\Client\Tool\BearerAuthorizationTrait;
+use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use TheNetworg\OAuth2\Client\Grant\JwtBearer;
 use TheNetworg\OAuth2\Client\Token\AccessToken;
@@ -45,6 +49,20 @@ class Azure extends AbstractProvider
 
     public $authWithResource = true;
 
+    public $defaultAlgorithm = null;
+
+    /**
+     * The contents of the private key used for app authentication
+     * @var string
+     */
+    protected $clientCertificatePrivateKey = '';
+
+    /**
+     * The hexadecimal certificate thumbprint as displayed in the azure portal
+     * @var string
+     */
+    protected $clientCertificateThumbprint = '';
+
     public function __construct(array $options = [], array $collaborators = [])
     {
         parent::__construct($options, $collaborators);
@@ -54,6 +72,9 @@ class Azure extends AbstractProvider
         if (isset($options['defaultEndPointVersion']) &&
             in_array($options['defaultEndPointVersion'], self::ENDPOINT_VERSIONS, true)) {
             $this->defaultEndPointVersion = $options['defaultEndPointVersion'];
+        }
+        if (isset($options['defaultAlgorithm'])) {
+            $this->defaultAlgorithm = $options['defaultAlgorithm'];
         }
         $this->grantFactory->setGrant('jwt_bearer', new JwtBearer());
     }
@@ -86,19 +107,54 @@ class Azure extends AbstractProvider
         return $this->openIdConfiguration[$tenant][$version];
     }
 
-    public function getBaseAuthorizationUrl()
+    /**
+     * @inheritdoc
+     */
+    public function getBaseAuthorizationUrl(): string
     {
         $openIdConfiguration = $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
         return $openIdConfiguration['authorization_endpoint'];
     }
 
-    public function getBaseAccessTokenUrl(array $params)
+    /**
+     * @inheritdoc
+     */
+    public function getBaseAccessTokenUrl(array $params): string
     {
         $openIdConfiguration = $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
         return $openIdConfiguration['token_endpoint'];
     }
 
-    public function getAccessToken($grant, array $options = [])
+    protected function getAccessTokenRequest(array $params): RequestInterface
+    {
+      if ($this->clientCertificatePrivateKey && $this->clientCertificateThumbprint) {
+        $header = [
+          'x5t' => base64_encode(hex2bin($this->clientCertificateThumbprint)),
+        ];
+        $now = time();
+        $payload = [
+          'aud' => "https://login.microsoftonline.com/{$this->tenant}/oauth2/v2.0/token",
+          'exp' => $now + 360,
+          'iat' => $now,
+          'iss' => $this->clientId,
+          'jti' => bin2hex(random_bytes(20)),
+          'nbf' => $now,
+          'sub' => $this->clientId,
+        ];
+        $jwt = JWT::encode($payload, str_replace('\n', "\n", $this->clientCertificatePrivateKey), 'RS256', null, $header);
+
+        unset($params['client_secret']);
+        $params['client_assertion_type'] = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+        $params['client_assertion'] = $jwt;
+      }
+
+      return parent::getAccessTokenRequest($params);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function getAccessToken($grant, array $options = []): AccessTokenInterface
     {
         if ($this->defaultEndPointVersion != self::ENDPOINT_VERSION_2_0) {
             // Version 2.0 does not support the resources parameter
@@ -112,14 +168,22 @@ class Azure extends AbstractProvider
         return parent::getAccessToken($grant, $options);
     }
 
-    public function getResourceOwner(\League\OAuth2\Client\Token\AccessToken $token)
+    /**
+     * @inheritdoc
+     */
+    public function getResourceOwner(\League\OAuth2\Client\Token\AccessToken $token): ResourceOwnerInterface
     {
         $data = $token->getIdTokenClaims();
         return $this->createResourceOwner($data, $token);
     }
 
-    public function getResourceOwnerDetailsUrl(\League\OAuth2\Client\Token\AccessToken $token)
+    /**
+     * @inheritdoc
+     */
+    public function getResourceOwnerDetailsUrl(\League\OAuth2\Client\Token\AccessToken $token): string
     {
+        $openIdConfiguration = $this->getOpenIdConfiguration($this->tenant, $this->defaultEndPointVersion);
+        return $openIdConfiguration['userinfo_endpoint'];
     }
 
     public function getObjects($tenant, $ref, &$accessToken, $headers = [])
@@ -164,8 +228,8 @@ class Azure extends AbstractProvider
             $version = $this->defaultEndPointVersion;
         } else {
             $idTokenClaims = $accessToken->getIdTokenClaims();
-            $tenant = array_key_exists('tid', $idTokenClaims) ? $idTokenClaims['tid'] : $this->tenant;
-            $version = array_key_exists('ver', $idTokenClaims) ? $idTokenClaims['ver'] : $this->defaultEndPointVersion;
+            $tenant = is_array($idTokenClaims) && array_key_exists('tid', $idTokenClaims) ? $idTokenClaims['tid'] : $this->tenant;
+            $version = is_array($idTokenClaims) && array_key_exists('ver', $idTokenClaims) ? $idTokenClaims['ver'] : $this->defaultEndPointVersion;
         }
         $openIdConfiguration = $this->getOpenIdConfiguration($policy, $tenant, $version);
         return 'https://' . $openIdConfiguration['msgraph_host'];
@@ -364,7 +428,10 @@ class Azure extends AbstractProvider
         return $this->getOpenIdConfiguration($this->policy, $this->tenant, $this->defaultEndPointVersion);
     }
 
-    protected function checkResponse(ResponseInterface $response, $data)
+    /**
+     * @inheritdoc
+     */
+    protected function checkResponse(ResponseInterface $response, $data): void
     {
         if (isset($data['odata.error']) || isset($data['error'])) {
             if (isset($data['odata.error']['message']['value'])) {
@@ -384,27 +451,39 @@ class Azure extends AbstractProvider
             throw new IdentityProviderException(
                 $message,
                 $response->getStatusCode(),
-                $response
+                $response->getBody()
             );
         }
     }
 
-    protected function getDefaultScopes()
+    /**
+     * @inheritdoc
+     */
+    protected function getDefaultScopes(): array
     {
         return $this->scope;
     }
 
-    protected function getScopeSeparator()
+    /**
+     * @inheritdoc
+     */
+    protected function getScopeSeparator(): string
     {
         return $this->scopeSeparator;
     }
 
-    protected function createAccessToken(array $response, AbstractGrant $grant)
+    /**
+     * @inheritdoc
+     */
+    protected function createAccessToken(array $response, AbstractGrant $grant): AccessToken
     {
         return new AccessToken($response, $this);
     }
 
-    protected function createResourceOwner(array $response, \League\OAuth2\Client\Token\AccessToken $token)
+    /**
+     * @inheritdoc
+     */
+    protected function createResourceOwner(array $response, \League\OAuth2\Client\Token\AccessToken $token): AzureResourceOwner
     {
         return new AzureResourceOwner($response);
     }
