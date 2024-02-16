@@ -2,6 +2,7 @@
 
 namespace TheNetworg\OAuth2\Client\Provider;
 
+use Firebase\JWT\JWK;
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 use phpseclib3\Crypt\PublicKeyLoader;
@@ -127,28 +128,28 @@ class Azure extends AbstractProvider
 
     protected function getAccessTokenRequest(array $params): RequestInterface
     {
-      if ($this->clientCertificatePrivateKey && $this->clientCertificateThumbprint) {
-        $header = [
-          'x5t' => base64_encode(hex2bin($this->clientCertificateThumbprint)),
-        ];
-        $now = time();
-        $payload = [
-          'aud' => "https://login.microsoftonline.com/{$this->tenant}/oauth2/v2.0/token",
-          'exp' => $now + 360,
-          'iat' => $now,
-          'iss' => $this->clientId,
-          'jti' => bin2hex(random_bytes(20)),
-          'nbf' => $now,
-          'sub' => $this->clientId,
-        ];
-        $jwt = JWT::encode($payload, str_replace('\n', "\n", $this->clientCertificatePrivateKey), 'RS256', null, $header);
+        if ($this->clientCertificatePrivateKey && $this->clientCertificateThumbprint) {
+            $header = [
+                'x5t' => base64_encode(hex2bin($this->clientCertificateThumbprint)),
+            ];
+            $now = time();
+            $payload = [
+                'aud' => "https://login.microsoftonline.com/{$this->tenant}/oauth2/v2.0/token",
+                'exp' => $now + 360,
+                'iat' => $now,
+                'iss' => $this->clientId,
+                'jti' => bin2hex(random_bytes(20)),
+                'nbf' => $now,
+                'sub' => $this->clientId,
+            ];
+            $jwt = JWT::encode($payload, str_replace('\n', "\n", $this->clientCertificatePrivateKey), 'RS256', null, $header);
 
-        unset($params['client_secret']);
-        $params['client_assertion_type'] = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
-        $params['client_assertion'] = $jwt;
-      }
+            unset($params['client_secret']);
+            $params['client_assertion_type'] = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+            $params['client_assertion'] = $jwt;
+        }
 
-      return parent::getAccessTokenRequest($params);
+        return parent::getAccessTokenRequest($params);
     }
 
     /**
@@ -344,7 +345,7 @@ class Azure extends AbstractProvider
     public function validateAccessToken($accessToken)
     {
         $key        = $this->getJwtVerificationKeys();
-        $tokenClaims = (array)JWT::decode($accessToken, $key, ['RS256']);
+        $tokenClaims = (array)JWT::decode($accessToken, $key);
 
         $this->validateTokenClaims($tokenClaims);
 
@@ -392,18 +393,24 @@ class Azure extends AbstractProvider
         $request = $factory->getRequestWithOptions('get', $keysUri, []);
 
         $response = $this->getParsedResponse($request);
-
+        $alg = 'RS256';
         $keyinfo = $response['keys'][0];
 
-        $exponent = $this->convert_base64url_to_base64($keyinfo['e']); // Alter to correct format
-        $modulus = $this->convert_base64url_to_base64($keyinfo['n']); // Alter to correct format
+        $pkey_object = JWK::parseKey($keyinfo, $alg);
 
-        $key = PublicKeyLoader::load([
-            'e' => new BigInteger(base64_decode($exponent), 256),
-            'n' => new BigInteger(base64_decode($modulus), 256)
-        ]);
+        if ($pkey_object === false) {
+            throw new \RuntimeException('An attempt to read a public key from a ' . $keyinfo['n'] . ' certificate failed.');
+        }
 
-        return $key;
+        $pkey_array = openssl_pkey_get_details($pkey_object->getKeyMaterial());
+
+        if ($pkey_array === false) {
+            throw new \RuntimeException('An attempt to get a public key as an array from a ' . $keyinfo['n'] . ' certificate failed.');
+        }
+
+        $publicKey = $pkey_array ['key'];
+
+        return new Key($publicKey, 'RS256');
     }
 
     protected function getVersionUriInfix($version)
